@@ -54,6 +54,7 @@ ENV PATH="/src/.venv/bin:$PATH"
 
 # Copy the application code
 COPY --chown=app:app main.py /src/main.py
+COPY --chown=app:app models /src/models
 
 # Use the non-root user
 USER app:app

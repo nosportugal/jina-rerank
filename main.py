@@ -11,32 +11,22 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import RedirectResponse
 from fastembed.rerank.cross_encoder import TextCrossEncoder
-from pydantic import BaseModel, Field, conlist
+
+from models import (
+    RerankRequest,
+    RerankResult,
+    RerankResponse,
+    InfoResponse,
+)
 
 ##
 # Load the config
 ##
-MODEL_NAME = 'jinaai/jina-reranker-v2-base-multilingual'
+MODEL_NAME = "jinaai/jina-reranker-v2-base-multilingual"
 VERSION = os.getenv("VERSION") or "unknown"
 BUILD_ID = os.getenv("BUILD_ID") or "unknown"
 COMMIT_SHA = os.getenv("COMMIT_SHA") or "unknown"
 PORT = int(os.getenv("PORT") or "8000")
-
-
-##
-# Models
-##
-class RerankRequest(BaseModel):
-    query: str = Field(..., description="The search query")
-    documents: conlist(str, min_length=1) = Field(..., description="List of documents to rerank")
-    batch_size: int = Field(32, description="Batch size for the model")
-
-
-class InfoResponse(BaseModel):
-    model_name: str = MODEL_NAME
-    version: str = VERSION
-    build_id: str = BUILD_ID
-    commit_sha: str = COMMIT_SHA
 
 
 ##
@@ -55,7 +45,7 @@ try:
     print(f"Loading model {MODEL_NAME}...")
     reranker = TextCrossEncoder(
         model_name=MODEL_NAME,
-        cache_dir=str(Path(__file__).parent.absolute() / ".model")
+        cache_dir=str(Path(__file__).parent.absolute() / ".model"),
     )
     print(f"Model {MODEL_NAME} loaded successfully")
 except Exception as e:
@@ -75,21 +65,34 @@ async def info():
     return InfoResponse()
 
 
-@app.post("/rerank", response_model=list[float])
+@app.post("/rerank", response_model=RerankResponse)
 async def rerank(request: RerankRequest = Body(...)):
     try:
-        # Compute the embeddings
+        # Compute the relevance scores
         scores = list(
             reranker.rerank(
                 request.query,
                 documents=request.documents,
-                batch_size=request.batch_size
+                batch_size=request.batch_size,
             )
         )
-        return scores
+
+        # Build results with index and relevance_score
+        results = [
+            RerankResult(index=i, relevance_score=score)
+            for i, score in enumerate(scores)
+        ]
+
+        return RerankResponse(
+            model=MODEL_NAME,
+            object="list",
+            results=results,
+        )
 
     except Exception as e_:
-        raise HTTPException(status_code=500, detail=f"Error during reranking: {str(e_)}") from e_
+        raise HTTPException(
+            status_code=500, detail=f"Error during reranking: {str(e_)}"
+        ) from e_
 
 
 if __name__ == "__main__":
