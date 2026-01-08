@@ -27,6 +27,7 @@ VERSION = os.getenv("VERSION") or "unknown"
 BUILD_ID = os.getenv("BUILD_ID") or "unknown"
 COMMIT_SHA = os.getenv("COMMIT_SHA") or "unknown"
 PORT = int(os.getenv("PORT") or "8000")
+COMPUTE_DEVICE = os.getenv("COMPUTE_DEVICE") or "cpu"
 
 
 ##
@@ -39,17 +40,41 @@ app = FastAPI(
 )
 
 ##
-# Load the model
+# Load the model (deferred to startup)
 ##
-try:
-    print(f"Loading model {MODEL_NAME}...")
-    reranker = TextCrossEncoder(
-        model_name=MODEL_NAME,
-        cache_dir=str(Path(__file__).parent.absolute() / ".model"),
-    )
-    print(f"Model {MODEL_NAME} loaded successfully")
-except Exception as e:
-    raise RuntimeError(f"Failed to load model: {str(e)}")
+reranker = None
+
+
+@app.on_event("startup")
+async def load_model():
+    global reranker
+    try:
+        print(f"Loading model {MODEL_NAME}...")
+        
+        # Check if GPU is requested and available
+        if COMPUTE_DEVICE == "gpu":
+            try:
+                import torch
+                use_gpu = torch.cuda.is_available()
+                print(f"GPU Available: {use_gpu}")
+                if use_gpu:
+                    print(f"GPU Device: {torch.cuda.get_device_name(0)}")
+                    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+            except ImportError:
+                print("Torch not available, GPU detection skipped")
+                use_gpu = False
+        else:
+            use_gpu = False
+        
+        reranker = TextCrossEncoder(
+            model_name=MODEL_NAME,
+            cache_dir=str(Path(__file__).parent.absolute() / ".model"),
+            providers=["CUDAExecutionProvider"] if COMPUTE_DEVICE == "gpu" else ["CPUExecutionProvider"],
+        )
+        
+        print(f"Model {MODEL_NAME} loaded successfully on {COMPUTE_DEVICE.upper()}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model: {str(e)}")
 
 
 ##
@@ -67,6 +92,8 @@ async def info():
 
 @app.post("/rerank", response_model=RerankResponse)
 async def rerank(request: RerankRequest = Body(...)):
+    if reranker is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
     try:
         # Compute the relevance scores
         scores = list(

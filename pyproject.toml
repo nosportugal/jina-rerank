@@ -1,6 +1,6 @@
 [project]
 name = "jina-rerank"
-version = "v0.4.3"
+version = "v0.5.7"
 urls = { "homepage" = "https://github.com/joanfabregat/jina-rerank" }
 description = "A multilingual reranker API based on jinaai/jina-reranker-v2-base-multilingual"
 authors = [
@@ -12,4 +12,9 @@ dependencies = [
     "uvicorn>=0.22.0",
     "pydantic>=2.0.0",
     "fastembed>=0.6.0",
+]
+
+[dependency-groups]
+gpu = [
+    "fastembed-gpu>=0.6.0",
 ]
