@@ -14,6 +14,11 @@ class RerankRequest(BaseModel):
         ..., description="List of documents to rerank"
     )
     batch_size: int = Field(32, description="Batch size for the model")
+    top_n: int | None = Field(
+        None,
+        description="Number of top results to return. If not specified, uses DEFAULT_TOP_N env var or returns all results.",
+        alias="top_k",
+    )
 
 
 class RerankResult(BaseModel):

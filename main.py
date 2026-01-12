@@ -28,6 +28,7 @@ BUILD_ID = os.getenv("BUILD_ID") or "unknown"
 COMMIT_SHA = os.getenv("COMMIT_SHA") or "unknown"
 PORT = int(os.getenv("PORT") or "8000")
 COMPUTE_DEVICE = os.getenv("COMPUTE_DEVICE") or "cpu"
+DEFAULT_TOP_N = int(os.getenv("DEFAULT_TOP_N") or "0")  # 0 means return all
 
 
 ##
@@ -95,12 +96,16 @@ async def rerank(request: RerankRequest = Body(...)):
     if reranker is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
     try:
+        # Determine top_n: use request value, fall back to env var, or None for all
+        top_n = request.top_n if request.top_n is not None else (DEFAULT_TOP_N if DEFAULT_TOP_N > 0 else None)
+        
         # Compute the relevance scores
         scores = list(
             reranker.rerank(
                 request.query,
                 documents=request.documents,
                 batch_size=request.batch_size,
+                top_n=top_n,
             )
         )
 
