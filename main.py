@@ -7,6 +7,7 @@
 
 import os
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import RedirectResponse
@@ -29,7 +30,17 @@ COMMIT_SHA = os.getenv("COMMIT_SHA") or "unknown"
 PORT = int(os.getenv("PORT") or "8000")
 COMPUTE_DEVICE = os.getenv("COMPUTE_DEVICE") or "cpu"
 DEFAULT_TOP_N = int(os.getenv("DEFAULT_TOP_N") or "0")  # 0 means return all
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
+
+##
+# Configure logging
+##
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 ##
 # Create the FastAPI app
@@ -50,19 +61,19 @@ reranker = None
 async def load_model():
     global reranker
     try:
-        print(f"Loading model {MODEL_NAME}...")
+        logger.info(f"Loading model {MODEL_NAME}...")
         
         # Check if GPU is requested and available
         if COMPUTE_DEVICE == "gpu":
             try:
                 import torch
                 use_gpu = torch.cuda.is_available()
-                print(f"GPU Available: {use_gpu}")
+                logger.info(f"GPU Available: {use_gpu}")
                 if use_gpu:
-                    print(f"GPU Device: {torch.cuda.get_device_name(0)}")
-                    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+                    logger.info(f"GPU Device: {torch.cuda.get_device_name(0)}")
+                    logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
             except ImportError:
-                print("Torch not available, GPU detection skipped")
+                logger.warning("Torch not available, GPU detection skipped")
                 use_gpu = False
         else:
             use_gpu = False
@@ -73,8 +84,19 @@ async def load_model():
             providers=["CUDAExecutionProvider"] if COMPUTE_DEVICE == "gpu" else ["CPUExecutionProvider"],
         )
         
-        print(f"Model {MODEL_NAME} loaded successfully on {COMPUTE_DEVICE.upper()}")
+        # Detect actual provider used (fastembed may fall back to CPU)
+        actual_provider = "CPU"
+        if hasattr(reranker, 'model') and hasattr(reranker.model, 'model'):
+            providers = reranker.model.model.get_providers()
+            if "CUDAExecutionProvider" in providers:
+                actual_provider = "GPU"
+        
+        if COMPUTE_DEVICE == "gpu" and actual_provider == "CPU":
+            logger.warning(f"GPU was requested but model fell back to CPU. Check CUDA drivers.")
+        
+        logger.info(f"Model {MODEL_NAME} loaded successfully on {actual_provider}")
     except Exception as e:
+        logger.error(f"Failed to load model: {str(e)}")
         raise RuntimeError(f"Failed to load model: {str(e)}")
 
 
@@ -99,6 +121,8 @@ async def rerank(request: RerankRequest = Body(...)):
         # Determine top_n: use request value, fall back to env var, or None for all
         top_n = request.top_n if request.top_n is not None else (DEFAULT_TOP_N if DEFAULT_TOP_N > 0 else None)
         
+        logger.debug(f"Rerank request: query='{request.query[:50]}...', documents={len(request.documents)}, top_n={top_n} (requested={request.top_n}, default={DEFAULT_TOP_N}), batch_size={request.batch_size}")
+
         # Compute the relevance scores
         scores = list(
             reranker.rerank(
@@ -115,13 +139,20 @@ async def rerank(request: RerankRequest = Body(...)):
             for i, score in enumerate(scores)
         ]
 
-        return RerankResponse(
+        # Sort by relevance score (descending) and limit to top_n
+        results.sort(key=lambda x: x.relevance_score, reverse=True)
+        if top_n is not None:
+            results = results[:top_n]
+
+        response = RerankResponse(
             model=MODEL_NAME,
             object="list",
             results=results,
         )
-
+        logger.debug(f"Response: {response.model_dump_json()}")
+        return response
     except Exception as e_:
+        logger.error(f"Error during reranking: {str(e_)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Error during reranking: {str(e_)}"
         ) from e_
