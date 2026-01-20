@@ -80,6 +80,53 @@ MODEL_LOADED = Gauge(
     ["compute_device", "model_name"]
 )
 
+LAST_REQUEST_LATENCY = Gauge(
+    "jina_rerank_last_request_latency_seconds",
+    "Last request latency in seconds (for time series visualization)",
+    ["compute_device"]
+)
+
+LAST_INFERENCE_LATENCY = Gauge(
+    "jina_rerank_last_inference_latency_seconds",
+    "Last inference latency in seconds (for time series visualization)",
+    ["compute_device"]
+)
+
+LAST_DOCUMENT_COUNT = Gauge(
+    "jina_rerank_last_document_count",
+    "Number of documents in the last request (for correlation with latency)",
+    ["compute_device"]
+)
+
+LATENCY_PER_DOCUMENT = Gauge(
+    "jina_rerank_latency_per_document_seconds",
+    "Latency per document in seconds (inference_time / document_count)",
+    ["compute_device"]
+)
+
+REQUEST_LATENCY_BY_DOC_RANGE = Histogram(
+    "jina_rerank_request_latency_by_doc_range_seconds",
+    "Request latency in seconds, labeled by document count range",
+    ["compute_device", "doc_range"],
+    buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0]
+)
+
+
+def get_doc_range(count: int) -> str:
+    """Bucket document count into ranges to avoid high cardinality"""
+    if count <= 10:
+        return "1-10"
+    elif count <= 50:
+        return "11-50"
+    elif count <= 100:
+        return "51-100"
+    elif count <= 500:
+        return "101-500"
+    elif count <= 1000:
+        return "501-1000"
+    else:
+        return "1000+"
+
 
 ##
 # Create the FastAPI app
@@ -123,11 +170,22 @@ async def load_model():
             providers=["CUDAExecutionProvider"] if COMPUTE_DEVICE == "gpu" else ["CPUExecutionProvider"],
         )
         
-        MODEL_LOADED.labels(compute_device=COMPUTE_DEVICE, model_name=MODEL_NAME).set(1)
-        logger.info(f"Model {MODEL_NAME} loaded successfully on {COMPUTE_DEVICE.upper()}")
+        # Detect actual provider used (fastembed may fall back to CPU)
+        actual_provider = "CPU"
+        if hasattr(reranker, 'model') and hasattr(reranker.model, 'model'):
+            providers = reranker.model.model.get_providers()
+            if "CUDAExecutionProvider" in providers:
+                actual_provider = "GPU"
+        
+        if COMPUTE_DEVICE == "gpu" and actual_provider == "CPU":
+            logger.warning(f"GPU was requested but model fell back to CPU. Check CUDA drivers.")
+        
+        logger.info(f"Model {MODEL_NAME} loaded successfully on {actual_provider}")
     except Exception as e:
         logger.error(f"Failed to load model: {str(e)}")
         raise RuntimeError(f"Failed to load model: {str(e)}")
+
+
 
 
 ##
@@ -172,11 +230,11 @@ async def rerank(request: RerankRequest = Body(...)):
                 request.query,
                 documents=request.documents,
                 batch_size=request.batch_size,
-                top_n=top_n,
             )
         )
         inference_duration = time.time() - inference_start
         RERANK_LATENCY.labels(compute_device=COMPUTE_DEVICE).observe(inference_duration)
+        LAST_INFERENCE_LATENCY.labels(compute_device=COMPUTE_DEVICE).set(inference_duration)
 
         logger.debug(f"Inference completed in {inference_duration:.4f}s, scores={scores[:3]}...")
 
@@ -185,13 +243,28 @@ async def rerank(request: RerankRequest = Body(...)):
             RerankResult(index=i, relevance_score=score)
             for i, score in enumerate(scores)
         ]
+        
+        # Sort by relevance score (descending) and limit to top_n
+        results.sort(key=lambda x: x.relevance_score, reverse=True)
+        if top_n is not None:
+            results = results[:top_n]
 
         # Record success metrics
         REQUEST_COUNT.labels(compute_device=COMPUTE_DEVICE, status="success").inc()
         total_duration = time.time() - start_time
         REQUEST_LATENCY.labels(compute_device=COMPUTE_DEVICE).observe(total_duration)
+        LAST_REQUEST_LATENCY.labels(compute_device=COMPUTE_DEVICE).set(total_duration)
+        
+        # Document count correlation metrics
+        doc_count = len(request.documents)
+        LAST_DOCUMENT_COUNT.labels(compute_device=COMPUTE_DEVICE).set(doc_count)
+        LATENCY_PER_DOCUMENT.labels(compute_device=COMPUTE_DEVICE).set(inference_duration / doc_count)
+        REQUEST_LATENCY_BY_DOC_RANGE.labels(
+            compute_device=COMPUTE_DEVICE, 
+            doc_range=get_doc_range(doc_count)
+        ).observe(total_duration)
 
-        logger.debug(f"Request completed in {total_duration:.4f}s")
+        logger.debug(f"Request completed in {total_duration:.4f}s, returning {len(results)} results")
 
         response = RerankResponse(
             model=MODEL_NAME,
